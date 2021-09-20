@@ -1,0 +1,841 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+This notebook contains:
+1. setting up the data object and exploring the expression data
+2. Merging and aligning the two samples
+3. Clustering and exploration of resolution
+4. Exploring expression in cluster and finding cluster markers
+5. Differential expression analysis 
+6. Proportional analysis between genotypes and proportion of cells in each cluster between genotypes. 
+
+
+
+MBO 160 AST23 and AST23 isogenic 
+Prepare the work space
+
+```{r}
+# clear space 
+# load libraries
+
+rm(list=ls())
+library("ggplot2")
+library("Seurat")
+library("cowplot")
+library("clustree")
+library(patchwork)
+library(dplyr)
+library("Matrix")
+
+
+```
+
+
+
+Read in the raw data and create the seurat objects
+
+```{r}
+#### Read in data 
+###  I'll take the raw data 
+
+# AST23
+pathway1 <- "/home/rhalena/scRNAseq/AST23_160dMBO_Feb2020/AST23/raw_feature_bc_matrix"
+
+# AST23 isogenic
+pathway2 <- "/home/rhalena/scRNAseq/AST23_160dMBO_Feb2020/AST23isogenic/raw_feature_bc_matrix"
+
+# create seurat objects
+AST23.data <- Read10X(data.dir = pathway1)
+AST23 <- CreateSeuratObject(counts = AST23.data, project = "AST23")
+AST23 <- subset(AST23, subset = nFeature_RNA > 1)
+print("Raw data object AST23")
+AST23
+AST23[["percent.mt"]] <- PercentageFeatureSet(AST23, pattern = "^MT-")
+AST23iso.data <- Read10X(data.dir = pathway2)
+AST23iso <- CreateSeuratObject(counts = AST23iso.data, project = "Isogenic")
+AST23iso <- subset(AST23iso, subset = nFeature_RNA > 1)
+AST23iso[["percent.mt"]] <- PercentageFeatureSet(AST23iso, pattern = "^MT-")
+AST23iso
+
+
+```
+
+Compare plots with different filters
+
+```{r}
+# filter for cells with a least one transcript and fewer than 10,000
+AST23_100 <- subset(AST23, subset = nFeature_RNA > 100)
+AST23iso_100 <- subset(AST23iso, subset = nFeature_RNA > 100)
+
+org.combined_100 <- merge(AST23_100, y=AST23iso_100, add.cell.ids = c("AST23","Isogenic"))
+org.combined_100
+
+```
+
+
+```{r}
+# plots
+vp1 <- VlnPlot(org.combined_100, features = c("nFeature_RNA"), split.by = 'orig.ident')
+vp2 <- VlnPlot(org.combined_100, features = c("nCount_RNA"), split.by = 'orig.ident')
+vp3 <- VlnPlot(org.combined_100, features = c("percent.mt"), split.by = 'orig.ident')
+
+vp1
+vp2
+vp3
+
+```
+
+
+
+
+```{r}
+# Filter with 500 and see the MT
+AST23_500 <- subset(AST23, subset = nFeature_RNA > 500)
+AST23iso_500 <- subset(AST23iso, subset = nFeature_RNA > 500)
+
+org.combined_500 <- merge(AST23_500, y=AST23iso_500, add.cell.ids = c("AST23","Isogenic"))
+org.combined_500
+
+```
+
+```{r}
+# plots
+vp1 <- VlnPlot(org.combined_500, features = c("nFeature_RNA"), split.by = 'orig.ident')
+vp2 <- VlnPlot(org.combined_500, features = c("nCount_RNA"), split.by = 'orig.ident')
+vp3 <- VlnPlot(org.combined_500, features = c("percent.mt"), split.by = 'orig.ident')
+
+vp1
+vp2
+vp3
+
+```
+
+
+
+```{r}
+# feature plots 
+# Filter 100
+plot1 <- FeatureScatter(org.combined_100, feature1 = "nCount_RNA", feature2 = "nFeature_RNA")
+plot1
+plotMT1 <- FeatureScatter(org.combined_100, feature1 = "nCount_RNA" , feature2 = "percent.mt")
+plotMT1
+# Filter 500
+plot2 <- FeatureScatter(org.combined_500, feature1 = "nCount_RNA", feature2 = "nFeature_RNA")
+plot2
+plotMT2 <- FeatureScatter(org.combined_500, feature1 = "nCount_RNA" , feature2 = "percent.mt")
+plotMT2
+
+```
+
+
+Make on data object to combine the filtered samples
+
+```{r}
+# Compare the align compare pre and post
+# first have a look at this object
+# normalize the data
+org.combined <- NormalizeData(org.combined_500)
+# select variable features 
+org.combined <- FindVariableFeatures(org.combined, selectMethod= "vst", nfeatures = 5000)
+#org.combined <- RunPCA(org.combined_500, npcs = 25, verbose = FALSE)
+top10 <- head(VariableFeatures(org.combined), 10)
+
+# plot variable features
+plotVar <- VariableFeaturePlot(org.combined)
+plotVar <- LabelPoints(plot = plotVar, points = top10, repel = TRUE)
+plotVar
+
+
+```
+Try different normalization
+
+```{r}
+# Compare the align compare pre and post
+# first have a look at this object
+# normalize the data
+org.combined <- NormalizeData(org.combined_500, normalization.method = "CLR")
+# select variable features 
+org.combined <- FindVariableFeatures(org.combined, selectMethod= "vst", nfeatures = 5000)
+#org.combined <- RunPCA(org.combined_500, npcs = 25, verbose = FALSE)
+top10 <- head(VariableFeatures(org.combined), 10)
+
+# plot variable features
+plotVarCRLvst <- VariableFeaturePlot(org.combined)
+plotVarCRLvst <- LabelPoints(plot = plotVarCRLvst, points = top10, repel = TRUE)
+plotVarCRLvst
+
+
+# normalize the data
+org.combined <- NormalizeData(org.combined_500, normalization.method = "RC")
+# select variable features 
+org.combined <- FindVariableFeatures(org.combined, selectMethod= "vst", nfeatures = 5000)
+#org.combined <- RunPCA(org.combined_500, npcs = 25, verbose = FALSE)
+top10 <- head(VariableFeatures(org.combined), 10)
+
+# plot variable features
+plotVarRCvst <- VariableFeaturePlot(org.combined)
+plotVarRCvst <- LabelPoints(plot = plotVarRCvst, points = top10, repel = TRUE)
+plotVarRCvst
+
+
+
+```
+Check if the FindVariable features methods changes the outcome
+
+
+```{r}
+# explore variable features
+# Compare the align compare pre and post
+# first have a look at this object
+# normalize the data
+org.combined <- NormalizeData(org.combined_500,normalization.method = "LogNormalize")
+# select variable features 
+org.combined <- FindVariableFeatures(org.combined, selectMethod= "vst", nfeatures = 5000)
+#org.combined <- RunPCA(org.combined_500, npcs = 25, verbose = FALSE)
+top10 <- head(VariableFeatures(org.combined), 10)
+
+# plot variable features
+plotVarLog <- VariableFeaturePlot(org.combined)
+plotVarLog <- LabelPoints(plot = plotVarLog, points = top10, repel = TRUE)
+plotVarLog
+
+org.combined <- NormalizeData(org.combined_500, normalization.method = "LogNormalize")
+# select variable features 
+org.combined <- FindVariableFeatures(org.combined, selectMethod= "mvp", nfeatures = 5000)
+#org.combined <- RunPCA(org.combined_500, npcs = 25, verbose = FALSE)
+top10 <- head(VariableFeatures(org.combined), 10)
+
+# plot variable features
+plotVar <- VariableFeaturePlot(org.combined)
+plotVar <- LabelPoints(plot = plotVar, points = top10, repel = TRUE)
+plotVar
+
+# disperse
+
+org.combined <- NormalizeData(org.combined_500, normalization.method = "LogNormalize")
+# select variable features 
+org.combined <- FindVariableFeatures(org.combined, selectMethod= "disp", nfeatures = 5000)
+#org.combined <- RunPCA(org.combined_500, npcs = 25, verbose = FALSE)
+top10 <- head(VariableFeatures(org.combined), 10)
+
+# plot variable features
+plotVar <- VariableFeaturePlot(org.combined)
+plotVar <- LabelPoints(plot = plotVar, points = top10, repel = TRUE)
+plotVar
+
+```
+There were no obvious difference in the variable features with different normalization and method of finding variable genes
+
+```{r}
+org.combined <- NormalizeData(org.combined_500,normalization.method = "LogNormalize")
+# select variable features 
+org.combined <- FindVariableFeatures(org.combined, selectMethod= "vst", nfeatures = 5000)
+#org.combined <- RunPCA(org.combined_500, npcs = 25, verbose = FALSE)
+top10 <- head(VariableFeatures(org.combined), 10)
+
+# scale the data
+all.genes <- rownames(org.combined)
+org.combined <- ScaleData(org.combined, features = all.genes)
+
+
+```
+
+PCA
+
+```{r}
+org.combined <- RunPCA(org.combined, features = VariableFeatures(object = org.combined))
+PCA.normal <- print(org.combined[["pca"]], dims = 1:5, nfeatures = 5)
+# visualize the PC
+VizDimLoadings(org.combined, dims = 1:2, reduction = "pca")
+DimPlot(org.combined, reduction = "pca")
+
+# how many PC to use for clustering?
+ElbowPlot(org.combined, ndims = 30)
+
+```
+
+Clustering will a UMAP look the same shape with and without aligning?
+
+```{r}
+# clustering use org.combined
+org.combined <- RunUMAP(org.combined, dims = 1:25)
+org.combined <- FindNeighbors(org.combined, reduction = "pca", dims = 1:25)
+org.combined <- FindClusters(org.combined, resolution = 0.6)
+
+p1 <- DimPlot(org.combined, reduction = "umap", group.by = "orig.ident")
+p2 <- DimPlot(org.combined, reduction = "umap", label = TRUE, repel = TRUE)
+
+p1
+p2
+
+
+```
+
+Alignment methods - anchor integration
+
+```{r}
+# split the object
+mbo.list <- SplitObject(org.combined_500, split.by = "ident")
+# normalize and find individual variable features
+mbo.list <- lapply(X = mbo.list, FUN = function(x) {
+  x <- NormalizeData(x)
+  x <- FindVariableFeatures(x, selection.method = "vst", nfeatures = 5000)
+})
+# find the common variable features
+features <- SelectIntegrationFeatures(object.list = mbo.list)
+# find the anchors
+mbo.anchors <- FindIntegrationAnchors(object.list = mbo.list, anchor.features = features)
+# Integrate the data
+mbo.integrated <- IntegrateData(anchorset = mbo.anchors)
+
+
+
+```
+
+See the PCA from the integration and alignment
+
+```{r}
+# use the integration as the default assay and compare with just using 
+DefaultAssay(mbo.integrated) <- "integrated"
+
+# start of standard workflow
+mbo.integrated <- ScaleData(mbo.integrated, verbose = FALSE)
+mbo.integrated <- RunPCA(mbo.integrated, npcs = 30, verbose = FALSE)
+# find the top PCA
+PCA.integrated <- print(mbo.integrated[["pca"]], dims = 1:5, nfeatures = 5)
+# visualize the PC
+VizDimLoadings(mbo.integrated, dims = 1:2, reduction = "pca")
+DimPlot(mbo.integrated, reduction = "pca")
+
+
+```
+
+More visualization
+```{r}
+
+
+PCA.normal <- print(org.combined[["pca"]], dims = 1:5, nfeatures = 5)
+# visualize the PC
+VizDimLoadings(org.combined, dims = 1:2, reduction = "pca")
+DimPlot(org.combined, reduction = "pca")
+```
+
+
+Try with RNA instand of integrated 
+
+```{r}
+# use the integration as the default assay and compare with just using 
+DefaultAssay(mbo.integrated) <- "RNA"
+
+# start of standard workflow
+mbo.integrated <- ScaleData(mbo.integrated, verbose = FALSE)
+mbo.integrated <- RunPCA(mbo.integrated, npcs = 30, verbose = FALSE)
+# find the top PCA
+PCA.integrated <- print(mbo.integrated[["pca"]], dims = 1:5, nfeatures = 5)
+# visualize the PC
+VizDimLoadings(mbo.integrated, dims = 1:2, reduction = "pca")
+DimPlot(mbo.integrated, reduction = "pca")
+# looks exactly the same 
+
+```
+
+Clustering from the integrated 
+
+```{r}
+ElbowPlot(mbo.integrated, ndims = 30)
+# clustering use org.combined
+mbo.integrated <- RunUMAP(mbo.integrated, dims = 1:25)
+mbo.integrated <- FindNeighbors(mbo.integrated, reduction = "pca", dims = 1:25)
+mbo.integrated <- FindClusters(mbo.integrated, resolution = 0.6)
+
+p1 <- DimPlot(mbo.integrated, reduction = "umap", group.by = "orig.ident")
+p2 <- DimPlot(mbo.integrated, reduction = "umap", label = TRUE, repel = TRUE)
+
+p1
+p2
+
+
+```
+
+
+
+```{r}
+# cluster the cells try a higher k in the knn /snn
+# mbo.integrated <- RunUMAP(mbo.integrated, dims = 1:25)
+mbo.integrated <- FindNeighbors(mbo.integrated, reduction = "pca", dims = 1:25, k.param = 75)
+
+
+p1 <- DimPlot(mbo.integrated, reduction = "umap", group.by = "orig.ident")
+p1
+# cluster at different resolutions
+MBOs <- mbo.integrated
+
+MBOs <- FindClusters(MBOs, resolution = c(0,0.1,0.3,0.5,0.6,0.8,1,1.2,1.8))
+clustree(MBOs, prefix = "integrated_snn_res.") + theme(legend.position = "bottom")
+
+
+# plot the different clusters
+res <-c(0,0.1,0.3,0.5,0.6,0.8,1,1.2,1.8)
+res_snn <- paste("integrated_snn_res.", res, sep="")
+
+for (i in res_snn) {
+  #print(i)
+  name = paste(i,"_02102020", sep="")
+  print(name)
+  print(DimPlot(MBOs, reduction= 'umap', group.by = i,label = TRUE))
+  #myPath <- paste(setwd("~/scRNAseq/10Xoutput/Novemeber_2019/"),name, sep="")
+  #png(name)
+  #  print(DimPlot(org.combinedR2, reduction = "umap", group.by = i,label = TRUE))
+  #dev.off()
+  }
+
+
+
+
+```
+
+Find the cluster markers
+
+```{r}
+# find cluster markers
+res1.8.markers <- ClusterMarkers
+top10 <- res1.8.markers 
+# ran find markers for 1.8 the active resolution
+  ClusterMarkers <- FindAllMarkers(MBOs, logfc.threshold = 0.1, return.thresh = 0.05, only.pos = TRUE)
+  write.csv(ClusterMarkers,"FindALlClusters_res1.8_21042021.csv")
+#group by the top 10 for quick look up
+  top10 <- ClusterMarkers %>% group_by(cluster) %>% top_n(n = 10, wt = avg_log2FC)
+  write.csv(top10, "ClusterMarkersTop10_res1.8_21042021.csv")
+# group by the top 5 for heatmap
+  top5 <- ClusterMarkers %>% group_by(cluster) %>% top_n(n = 5, wt = avg_log2FC)
+  
+  top5hm <- DoHeatmap(MBOs, features = top5$gene, angle = 90, group.bar.height = 0.02, size = 4, hjust = 0)
+  top5hm
+  # save the heatmap so hopefully we can read
+  png("HeatmapTop5filter500mt20_k75res1.8.png")
+  DoHeatmap(MBOs, features = top5$gene, angle = 90, group.bar.height = 0.02, size = 4, hjust = 0)
+  dev.off()
+
+
+# try getting the top markers
+
+
+
+
+```
+
+Feature plots of some main markers
+
+
+
+```{r}
+# plots test the different markers
+feature_list = c("DLX2","SOX2","PAX6","SOX9","HES1","ITGA6","NES","RBFOX3","MAP2","NCAM1","CD24","GRIA2","GRIN2B","GABBR1","TH","CORIN","CALB1","KCNJ6","CXCR4","ITGA6","SLC1A3","CD44","AQP4","S100B","PDGFRA","OLIG2","MBP","CLDN11","VIM","VCAM1")
+
+DoHeatmap(MBOs, features = feature_list, size=4, angle =90, group.bar.height = 0.05)
+
+
+```
+Testing the find markers loop - didn't run
+
+```{r}
+ # find cluster markers
+res <-c(0,0.1,0.3,0.5,0.6,0.8,1,1.2,1.8)
+res_list <- c(0.6,1,1.2,1.8)
+
+res_list <- 0.1
+
+for (i in res_list) {
+  # get the whole list
+  MBOs <- FindClusters(MBOs, resolution = i)
+  name = paste("FindAllClusters_res",i,"_21042021",".csv", sep="")
+  print(name)
+  ClusterMarkers <- FindAllMarkers(MBOs, logfc.threshold = 0.1, return.thresh = 0.05, only.pos = TRUE)
+  write.csv(ClusterMarkers,name)
+  name2 = paste("Top10markers_res",i,"_21042021",".csv", sep="")
+  top10 <- ClusterMarkers %>% group_by(cluster) %>% top_n(n = 10, wt = avg_logFC)
+  print(name2)
+  #h1 <- DoHeatmap(MBOs, features = top10$gene + NoLegend())
+
+  # png(name2)
+  #h1
+  #dev.off()
+}
+```
+
+
+
+
+
+```{r}
+# remember to change to the RNA levels to get the expression
+DefaultAssay(MBOs) <- "RNA"
+MBOs <- ScaleData(MBOs)
+
+# plots test the different markers
+feature_list = c("MKI67","SOX2","POU5F1","DLX2","SOX2","PAX6","SOX9","HES1","ITGA6","NES","RBFOX3","MAP2","NCAM1","CD24","GRIA2","GRIN2B","GABBR1","GAD1","GAD2","GABRA1","GABRB2","TH","ALDH1A1","LMX1B","NR4A2","CORIN","CALB1","KCNJ6","CXCR4","ITGA6","SLC1A3","CD44","AQP4","S100B", "PDGFRA","OLIG2","MBP","CLDN11","VIM","VCAM1")
+
+FeaturePlot(MBOs, features = "SNCA", split.by = "orig.ident", pt.size = 0.5, keep.scale = "all")
+FeaturePlot(MBOs, features = "TH", split.by = "orig.ident", pt.size = 0.5, keep.scale = "all")
+
+# heat maps
+DoHeatmap(MBOs, features = feature_list, angle = 90, group.bar.height = 0.05, size = 4.5)
+
+
+```
+
+Calculate the differential gene expression between all cell for AST23 vs 2KO
+
+```{r}
+# create the identity to compare 
+Idents(MBOs) <- "orig.ident"
+
+#MBOs <- NormalizeData(MBOs)
+#MBOs$RNA_snn_res.1.orig.ident <- paste(Idents(MBOs), MBOs$orig.ident, sep = )
+
+DE_astvsConAll <- FindMarkers(MBOs, ident.1 = 'AST23', ident.2 = 'Isogenic')
+write.csv(DE_astvsConAll, "DE_ASTvsIsogenic_21042021_2.csv")
+# list will be of the genes upregulated in AST23 positive and neg are down regulated
+
+```
+
+
+Visualize the upregulated genes
+
+```{r}
+# 10 up 10 down
+upanddown <- c("STMN2","GRIN2B","TFP12","RPL27A","FTX","NNAT","RPS18","PPFIA2","PCDH9","CLASP2",
+               "CRYAB","SHISA3","ARMCX3","S100A10","MEST","PON2","FABP7","TAC1","RBP1","CDO1")
+plot <- DotPlot(MBOs, features = upanddown, group.by = "orig.ident")
+plot + theme(axis.text.x = element_text(angle = 90) )
+
+# clusters and ast23 vs Isogenic
+plot2 <- DotPlot(MBOs, features = upanddown, split.by = "orig.ident", group.by = "integrated_snn_res.1.8")
+plot2 + theme(axis.text.x = element_text(angle = 90) )
+
+```
+
+Test if the different neurons are different from eachother
+This is using the same function as find markers for finding cluster markers, just designating specific clusters
+
+0	Radial Glia
+1	Oligo
+2	neurons
+3	astrocytes
+4	neurons
+5	endothelial
+6	neurons
+7	microglial like
+8	neurons
+9	pericyte
+10	neurons
+11	neural progenitors
+12	neural stem cells
+13	neural plate cells
+14	early neurons
+
+```{r}
+# create the identity to compare 
+Idents(MBOs) <- "integrated_snn_res.1.8"
+
+#MBOs <- NormalizeData(MBOs)
+#MBOs$RNA_snn_res.1.orig.ident <- paste(Idents(MBOs), MBOs$orig.ident, sep = )
+# compare neurons 
+
+DE_n2_n4 <- FindMarkers(MBOs, ident.1 = 2, ident.2 = 4)
+write.csv(DE_n2_n4, "Cluster_neur2_neur4.csv")
+
+DE_n2_n6 <- FindMarkers(MBOs, ident.1 = 2, ident.2 = 6)
+write.csv(DE_n2_n6, "Cluster_neur2_neur6.csv")
+
+DE_n4_n6 <- FindMarkers(MBOs, ident.1 = 4, ident.2 = 6)
+write.csv(DE_n2_n6, "Cluster_neur4_neur6.csv")
+
+DE_n2_n8 <- FindMarkers(MBOs, ident.1 = 2, ident.2 = 8)
+write.csv(DE_n2_n8, "Cluster_neur2_neur8.csv")
+
+DE_n6_n8 <- FindMarkers(MBOs, ident.1 = 6, ident.2 = 8)
+write.csv(DE_n6_n8, "Cluster_neur6_neur8.csv")
+
+DE_n4_n8 <- FindMarkers(MBOs, ident.1 = 4, ident.2 = 8)
+write.csv(DE_n4_n8, "Cluster_neur4_neur8.csv")
+
+
+DE_n8_n10 <- FindMarkers(MBOs, ident.1 = 8, ident.2 = 10)
+write.csv(DE_n8_n10, "Cluster_neur8_neur10.csv")
+
+DE_n2_n10 <- FindMarkers(MBOs, ident.1 = 2, ident.2 = 10)
+write.csv(DE_n2_n10, "Cluster_neur2_neur10.csv")
+
+DE_n4_n10 <- FindMarkers(MBOs, ident.1 = 4, ident.2 = 10)
+write.csv(DE_n4_n10, "Cluster_neur4_neur10.csv")
+
+DE_n2_n14 <- FindMarkers(MBOs, ident.1 = 2, ident.2 = 14)
+write.csv(DE_n2_n14, "Cluster_neur2_neur14.csv")
+
+DE_n4_n14 <- FindMarkers(MBOs, ident.1 = 4, ident.2 = 14)
+write.csv(DE_n4_n14, "Cluster_neur2_neur14.csv")
+
+# compare neural progen, neural stem, neural plate
+
+DE_n11progen_n12stem <- FindMarkers(MBOs, ident.1 = 11, ident.2 = 12)
+write.csv(DE_n11progen_n12stem, "Cluster_progen11_stem12.csv")
+
+
+```
+
+
+Rename all the clusters and calculate DGE
+To calculate DGE between genotypes (or conditions) we need to annotate the cells to have both the cluster name and the genotype
+
+```{r}
+# cluster names from 15 clusters k=75, res=1.8
+new.cluster.ids <- c("Radial_Glia", "Oligo", "Neuron1", "Astrocyte", "Neuron2" , "Endothelial", "Neuron3", "Macrophage_Like","Neuron4", "Pericyte","Neuron5","Epithelial","Neural_Stem", "Neural_Plate", "Neural_Precursor")
+MBO.names <- MBOs
+
+names(new.cluster.ids) <- levels(MBO.names)
+
+MBO.names <- RenameIdents(MBO.names, new.cluster.ids)
+DimPlot(MBO.names, reduction = "umap", label = TRUE) #+ NoLegend()
+
+DimPlot(MBO.names, reduction = "umap", label = FALSE, split.by = "orig.ident") + NoLegend()
+
+# save the data object
+saveRDS(MBO.names, "MBOintegratedClusterK75res1.8.names")
+
+# here we have changed the clusters from number indexes to the assigened cell type names.
+
+```
+
+Try to load the saved object
+
+```{r}
+
+# load saved object
+
+MBO.names <- readRDS("/home/rhalena/scRNAseq/AST23_160dMBO_Feb2020/Analysis/April2021_analysis/ClusterMarkers_filter500andmt20/MBOintegratedClusterK75res1.8.names")
+
+
+```
+
+
+
+
+Differential gene expression between different groups
+Need to create the identities
+
+```{r}
+
+Idents(MBO.names) <- "integrated_snn_res.0.1"
+# active identity 
+
+# stash the cell name identities
+MBO.names$cell.type <- Idents(MBO.names)
+# create a cell type and gene label
+MBO.names$celltype.gene <- paste(Idents(MBO.names), MBO.names$orig.ident, sep = "_")
+# to stash the cell type labels
+# that cell type with gene label is now found under 'celltype.gene' 
+# it have become the active identity when we made it but that could change later in a different process
+
+# set the identity to be sure
+Idents(MBO.names) <- "celltype.gene"
+
+
+# now do each comparison
+# for each comparison I'm creating a df from the output and then I'm saving the dataframe as a csv with write.csv
+# be certain the name of the df matches the df passed to write.csv or you will be saving the wrong thing and it will be difficult to know.
+
+de.RG <- FindMarkers(MBO.names, ident.1 = "Radial_Glia_AST23", ident.2 = "Radial_Glia_Isogenic")
+write.csv(de.RG, "DE_RG.csv")
+
+de.oligo <- FindMarkers(MBO.names, ident.1 = "Oligo_AST23", ident.2 = "Oligo_Isogenic")
+write.csv(de.oligo, "DE_oligo.csv")
+
+de.neur1 <- FindMarkers(MBO.names, ident.1 = "Neuron1_AST23", ident.2 = "Neuron1_Isogenic")
+write.csv(de.neur1, "DE_Neuron1.csv")
+
+de.astro <- FindMarkers(MBO.names, ident.1 = "Astrocyte_AST23", ident.2 = "Astrocyte_Isogenic")
+write.csv(de.astro, "DE_Astro.csv")
+
+de.neur2 <- FindMarkers(MBO.names, ident.1 = "Neuron2_AST23", ident.2 = "Neuron2_Isogenic")
+write.csv(de.neur2, "DE_Neuron2.csv")
+
+de.endo <- FindMarkers(MBO.names, ident.1 = "Endothelial_AST23", ident.2 = "Endothelial_Isogenic")
+write.csv(de.endo, "DE_Endo.csv")
+
+de.neur3 <- FindMarkers(MBO.names, ident.1 = "Neuron3_AST23", ident.2 = "Neuron3_Isogenic")
+write.csv(de.neur3, "DE_Neuron3.csv")
+
+de.macro <- FindMarkers(MBO.names, ident.1 = "Macrophage_Like_AST23", ident.2 = "Macrophage_Like_Isogenic")
+write.csv(de.macro, "DE_Macro.csv")
+
+de.neur4 <- FindMarkers(MBO.names, ident.1 = "Neuron4_AST23", ident.2 = "Neuron4_Isogenic")
+write.csv(de.neur4, "DE_Neuron4.csv")
+
+de.peri <- FindMarkers(MBO.names, ident.1 = "Pericyte_AST23", ident.2 = "Pericyte_Isogenic")
+write.csv(de.peri, "DE_pericyte.csv")
+
+de.neur5 <- FindMarkers(MBO.names, ident.1 = "Neuron5_AST23", ident.2 = "Neuron5_Isogenic")
+write.csv(de.neur5, "DE_Neuron5.csv")
+
+de.epi <- FindMarkers(MBO.names, ident.1 = "Epithelial_AST23", ident.2 = "Epithelial_Isogenic")
+write.csv(de.epi, "DE_Epithelail.csv")
+
+de.neurostem <- FindMarkers(MBO.names, ident.1 = "Neural_Stem_AST23", ident.2 = "Neural_Stem_Isogenic")
+write.csv(de.neurostem, "DE_NeuralStem.csv")
+
+de.neuroplate <- FindMarkers(MBO.names, ident.1 = "Neural_Plate_AST23", ident.2 = "Neural_Plate_Isogenic")
+write.csv(de.neuroplate, "DE_Neural_Plate.csv")
+
+de.npc <- FindMarkers(MBO.names, ident.1 = "Neural_Precursor_AST23", ident.2 = "Neural_Precursor_Isogenic")
+write.csv(de.npc, "DE_NeuralPrecursor.csv")
+
+
+```
+
+
+I can pool all the neurons for DEG expression as well
+
+```{r}
+# merge all the neurons together
+# cluster names from 15 clusters k=75, res=1.8
+new.cluster.ids.2 <- c("Radial_Glia", "Oligo", "Neuron", "Astrocyte", "Neuron" , "Endothelial", "Neuron", "Macrophage_Like","Neuron", "Pericyte","Neuron","Epithelial","Neural_Stem", "Neural_Plate", "Neural_Precursor")
+MBO.2 <- MBOs
+
+names(new.cluster.ids.2) <- levels(MBO.2)
+
+MBO.2 <- RenameIdents(MBO.2, new.cluster.ids.2)
+DimPlot(MBO.2, reduction = "umap", label = TRUE) #+ NoLegend()
+
+DimPlot(MBO.2, reduction = "umap", label = FALSE, split.by = "orig.ident") + NoLegend()
+
+# now get the DEG for all the neurons together
+
+# stash the cell name identities
+MBO.2$cell.type.2 <- Idents(MBO.2)
+MBO.2$cell.gene.2 <- paste(Idents(MBO.2), MBO.2$orig.ident, sep = "_")
+# to stash the cell type labels
+
+Idents(MBO.2) <- "cell.gene.2"
+
+# get the DE
+
+de.neurons <- FindMarkers(MBO.2, ident.1 = "Neuron_AST23", ident.2 = "Neuron_Isogenic")
+write.csv(de.neurons, "DE_Neurons.csv")
+
+
+```
+
+
+Test if the proportion of cells is different between genotypes
+
+```{r}
+library("scProportionTest")
+# had to install in base R but appears to work here now
+# devtools::install_github("rpolicastro/scProportionTest")
+
+
+# have a seurat object 
+# add the test
+prop_test <- sc_utils(MBO.names)
+
+# Once the object is created, the permutation testing and bootstrapping can be run.
+
+prop_test <- permutation_test(
+	prop_test, cluster_identity = "celltype",
+	sample_1 = "Isogenic", sample_2 = "AST23",
+	sample_identity = "orig.ident"
+)
+
+# A point-range plot of the results can then be created.
+
+permutation_plot(prop_test)
+
+
+
+
+```
+
+Calculate proportion of gene expression
+
+```{r}
+# adapted from a response to brianpenghe by Ryan-Zhu on github issues
+
+# This will get the proportion of cells 
+
+PrctCellExpringGene <- function(object, genes, group.by = "all"){
+    if(group.by == "all"){
+        prct = unlist(lapply(genes,calc_helper, object=object))
+        result = data.frame(Markers = genes, Cell_proportion = prct)
+        return(result)
+    }
+
+    else{        
+        list = SplitObject(object, group.by)
+        factors = names(list)
+
+        results = lapply(list, PrctCellExpringGene, genes=genes)
+        for(i in 1:length(factors)){
+        results[[i]]$Feature = factors[i]
+        }
+        combined = do.call("rbind", results)
+        return(combined)
+    }
+}
+
+calc_helper <- function(object,genes){
+    counts = object[['RNA']]@counts
+    ncells = ncol(counts)
+    if(genes %in% row.names(counts)){
+    sum(counts[genes,]>0)/ncells
+    }else{return(NA)}
+}
+
+gene.list <- c("TH","SNCA","MAP2","CD44","CD24","CALB1")
+totalEXP <- PrctCellExpringGene(MBO.names,genes= gene.list)
+
+byMBO <- PrctCellExpringGene(MBO.names,genes=gene.list, group.by = "orig.ident")
+
+byCluster <- PrctCellExpringGene(MBO.names,genes=gene.list, group.by = "celltype.gene")
+
+write.csv(byCluster,"Proportionof_markerEXP_byCluster_byMBO.csv")
+write.csv(byMBO,"Proportionof_markerEXP_byMBO.csv")
+write.csv(totalEXP,"Proportionof_markerEXP_total.csv")
+
+
+
+```
+
+
+
+
+```{r}
+# intensity map on clusters
+# shows clusters
+#DimPlot(org.combinedR3Names, reduction = "umap", label = TRUE) #+ NoLegend()
+
+features = c("TH", "CD44", "MAP2","NCAM1")
+PD_list = c("SNCA","PINK1","PRKN","MAP2","NCAM1","CD24","TH","AQPR4","VIM","C3ORF58","SLC39A9")
+
+FeaturePlot(MBO.names, features = c("C3orf58","SLC39A9"))
+FeaturePlot(MBO.names, features = c("ACE2"))
+
+
+```
+
+
+```{r}
+features = c("TH", "CD44", "MAP2","NCAM1")
+PD_list = c("SNCA","PINK1","PRKN","MAP2","NCAM1","CD24","TH","AQPR4","VIM","C3ORF58","SLC39A9")
+
+PD_poulin = c("TH","SLC6A3","SLC18A2","SOX6","NDNF","SNCG","ALDH1A1","CALB1","TACR2","SLC17A6","SLC32A1","OTX2","GRP","LPL","CCK","VIP")
+DotPlot(MBO.names, group.by = "cell.type", split.by = "orig.ident", features= PD_poulin)
+
+DotPlot(MBO.names, group.by = "cell.type", split.by = "orig.ident", features= "TH", dot.scale = 8)
+
+
+```
+
+
