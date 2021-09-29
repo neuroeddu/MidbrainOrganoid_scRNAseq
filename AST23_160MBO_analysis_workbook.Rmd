@@ -1,0 +1,983 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+scRNAseq data from
+MBO 160 AST23 and AST23 isogenic control
+Organoids were grown in shaking cultures, dissocation was performed manually and with TryPLE.  The live cells were sorted by FACS and 3000 cells were targeted for sequencing.  
+Each dissociated was a pool of three MBOs.
+Each lane in 10X controler was loaded with a genotype.
+Filter, cluster and annotate clusters
+
+
+Prepare the work space
+
+```{r}
+# clear space 
+# load libraries
+
+rm(list=ls())
+library("ggplot2")
+library("Seurat")
+library("cowplot")
+library("clustree")
+library(patchwork)
+library(dplyr)
+library("Matrix")
+library("SingleCellExperiment")
+
+```
+
+
+
+Read in the raw data and create the seurat objects
+
+```{r}
+#### Read in data 
+
+# AST23
+pathway1 <- "/home/rhalena/scRNAseq/AST23_160dMBO_Feb2020/AST23/raw_feature_bc_matrix"
+
+# AST23 isogenic
+pathway2 <- "/home/rhalena/scRNAseq/AST23_160dMBO_Feb2020/AST23isogenic/raw_feature_bc_matrix"
+AST23.data <- Read10X(data.dir = pathway1)
+AST23 <- CreateSeuratObject(counts = AST23.data, project = "AST23")
+# min filter so that calculating MT won't crash
+AST23 <- subset(AST23, subset = nFeature_RNA > 1)
+AST23[["percent.mt"]] <- PercentageFeatureSet(AST23, pattern = "^MT-")
+AST23
+AST23iso.data <- Read10X(data.dir = pathway2)
+AST23iso <- CreateSeuratObject(counts = AST23iso.data, project = "Isogenic")
+# min filter so that calculating MT won't crash
+AST23iso <- subset(AST23iso, subset = nFeature_RNA > 1)
+AST23iso[["percent.mt"]] <- PercentageFeatureSet(AST23iso, pattern = "^MT-")
+AST23iso
+
+
+```
+Filter conditions were previously compared and optimal filters selected here.
+
+
+```{r}
+# Filter with 500 and less than 20% mitochondria
+AST23f <- subset(AST23, subset = nFeature_RNA > 500 & nFeatures < 10000 & percent.mt < 20)
+AST23f
+AST23isof <- subset(AST23iso, subset = nFeature_RNA > 500 & nFeatures < 10000 &percent.mt < 20)
+AST23isof
+MBO <- merge(AST23f, y=AST23isof, add.cell.ids = c("AST23","Isogenic"))
+MBO
+
+```
+
+Align data from two samples
+
+```{r}
+# set up the object
+MBO.list <- SplitObject(MBO, split.by = "ident")
+
+# normalize the data
+MBO.list <- lapply(X= MBO.list, FUN = function(x) {
+  x <- NormalizeData(x)
+  x <- FindVariableFeatures(x, selection.method = "vst", nfeatures = 5000)
+})
+
+features <- SelectIntegrationFeatures(object.list = MBO.list, nfeatures = 5000)
+
+# create the integrated object
+# create an object with the data ana anchors
+MBO.anchors <- FindIntegrationAnchors(object.list = MBO.list, anchor.features = features)
+# create a slot with the integration assay in a seurat object
+MBO.combined <- IntegrateData(anchorset = MBO.anchors) 
+
+```
+
+Perform the integrated analysis - clustering 
+
+
+
+```{r}
+# specify that we will perform downstream analysis on the corrected data note that the
+# original unmodified data still resides in the 'RNA' assay
+# for expression analysis I will change the assay back to 'RNA'
+DefaultAssay(MBO.combined) <- "integrated"
+
+# Run the standard workflow for visualization and clustering
+# 
+MBO.combined <- ScaleData(MBO.combined, verbose = FALSE)
+MBO.combined <- RunPCA(MBO.combined, npcs = 25, verbose = FALSE)
+MBO.combined <- RunUMAP(MBO.combined, reduction = "pca", dims = 1:25)
+# set k for SNN to be close to the square root of the number of starting cells 
+MBO.combined <- FindNeighbors(MBO.combined, reduction = "pca", dims = 1:25, k.param = 63)
+MBO.combined <- FindClusters(MBO.combined, resolution = c(0,0.1,0.3,0.6,0.9,1.2,1.8))
+clustree(MBO.combined, prefix = "integrated_snn_res.") + theme(legend.position = "bottom")
+# in fact the higher resolution just splits the neural population into subgroups - type of neurons 5 groups and neural stem cells NPC and neural plate split at lower resolutions.  
+
+
+```
+
+
+
+Visualize the results
+
+```{r}
+DimPlot(MBO.combined, reduction = "umap", group.by = "orig.ident")
+DimPlot(MBO.combined, reduction = "umap", repel = TRUE, label = TRUE, group.by = "integrated_snn_res.0.1")
+DimPlot(MBO.combined, reduction = "umap", repel = TRUE, label = TRUE, group.by = "integrated_snn_res.0.9")
+
+```
+
+
+
+
+```{r}
+# save this object for future reference
+# filter > 500 nRNA and < 20% mt DNA
+# integrated object
+saveRDS(MBO.combined,file = "CombinedIntegratedAST23CON_21-07-2021.rds")
+
+MBO.combined <- readRDS("CombinedIntegratedAST23CON_21-07-2021.rds")
+
+
+```
+
+Identify cell types/ annotate clusters
+Using Seurat Identify markers in an R script for each resolution. Performed separately as this step is long.
+
+
+```{r}
+
+# most up regulated in each cluster compared to all the other clusters
+# I want the full expression data not only the variant genes
+DefaultAssay(MBO.combined) <- "RNA"
+# decrease the cutoff for LogFold Change 
+ClusterMarkers <- FindAllMarkers(MBO.combined, logfc.threshold = 0.1, return.thresh = 0.05, only.pos = TRUE)
+
+# look at the marker list from resolution X 
+ClusterMarkers <- read.csv("/home/rhalena/scRNAseq/BrainCommRevision/baseR/SClusterMarkersPos21072021-res0.3.csv")
+top5 <- ClusterMarkers %>% group_by(cluster) %>% top_n(n=5, wt = avg_log2FC)
+
+# visualize the clusters
+# Visualize cluster marker top 5 positive
+# need to scale the data in the RNA slot to visualize
+DefaultAssay(MBO.combined) <- "RNA"
+MBO.combined <- ScaleData(MBO.combined, verbose = FALSE)
+# now plot the expression of the top 5 markers
+DoHeatmap(MBO.combined, features = top5$gene, group.by = "integrated_snn_res.0.3") + NoLegend()
+#png('ClusterMarker1.8top10heatmap.png')
+#h1
+#dev.off()
+
+
+```
+
+
+Look at a list of known markers
+
+I have created heatmaps of the known markers for each resolution together with the find markers function in a separate script. See 'getclustermarkers.R' 
+
+
+```{r}
+# stem cells, neurons, glia, epithelia/endothelial cells
+
+feature_list = c("DLX2","SOX2","PAX6","SOX9","HES1","ITGA6","MAP2","NCAM1","CD24","GRIA2","GRIN2B","GABBR1","TH","CORIN","CALB1","KCNJ6","CXCR4","ITGA6","NES","SLC1A3","CD44","AQP4","S100B","GFAP","ALDH1L1","SLC1A3","SLC1A2", "PDGFRA","CLDN11","VIM","VCAM1")
+
+
+DoHeatmap(MBO.combined, group.by = "integrated_snn_res.0.3", features = feature_list)
+
+```
+
+Look at expression of cell type gene list
+
+```{r}
+astrocyte <-  c("AQP4","S100B","CD44","SLC1A3","SLC1A2","SOX9","FAM213A", "AGT","NNAT","MGST1","CD9","GFAP","TMEM47")
+# note SLC1A3 is EAAT1 and SCL1A2 is EAAT2
+DoHeatmap(MBO.combined, features = astrocyte, size=4, angle =90, group.bar.height = 0.05)
+DotPlot(MBO.combined, features = astrocyte) + RotatedAxis()
+
+```
+
+
+Check cluster labels with automated annotation using two methods:
+I'm selecting from a long list of options for ones that were 
+Marker gene database-based : scCATCH ,, SCINA 
+Correlation-based (with reference scRNA data): Garnett, scClassify, scID, SingleR
+ClustifyR - can use any database including other scRNAseq
+
+
+
+```{r}
+# scCATCH
+# 
+# install devtools and install scCATCH
+install.packages(pkgs = 'devtools')
+devtools::install_github('ZJUFanLab/scCATCH')
+# install library
+library("scCATCH")
+# requires log normalized expression values
+DefaultAssay(MBO.combined) <- "RNA"
+# Log Normalize is the default
+MBO.combined <- NormalizeData(MBO.combined, verobse =TRUE)
+
+# get the cluster markers genes
+# select human as these are human organoids, use all other defaults
+clu_markers <- findmarkergenes(MBO.combined, species = "Human")
+# we can also designate a tissue - brain might be an option
+# this process is extreamly slow
+
+# save the data object
+saveRDS(clu_markers, "scCATCH_markers_14clusters.rds")
+
+clu_markers <- readRDS("scCATCH_markers_14clusters.rds")
+
+```
+
+
+```{r}
+
+
+# now use the marker found with scCATCH to annotate cluster
+clu_ann <- scCATCH(object = clu_markers$clu_markers, species = 'Human', tissue = 'Brain')
+# this only takes a few minutes to run
+
+```
+
+Using scCATCH there are astrocytes and oligodendrocytes and some neurons.
+
+
+```{r}
+
+# now use the marker found with scCATCH to annotate cluster
+clu_ann <- scCATCH(object = clu_markers$clu_markers, species = 'Human', tissue = c("Brain","Midbrain","Fetal brain","Embryonic brain","Sympathetic ganglion"))
+
+
+```
+Clusters are astrocyte, oligodendrocyte neurons and unknown.
+
+```{r}
+clu_ann
+
+```
+
+
+ ClustifyR
+
+```{r}
+
+library("clustifyr")
+# There should be variable genes slot 
+DefaultAssay(MBO.combined) <- "RNA"
+MBO.combined <- FindVariableFeatures(MBO.combined, nfeatures = 2000)
+
+
+#FindVariableGenes stores the variable genes in the var.genes slot, with the means and dispersion values stored in the hvg.info slot.
+
+
+# I cannot just download and read them in - it loads as a variable although it is an R object
+# the authors provide a way to get datasets 
+# clufiyrdatahub 
+
+if (!requireNamespace("BiocManager", quietly = TRUE))
+    install.packages("BiocManager")
+
+BiocManager::install("clustifyrdatahub")
+
+# see the libraries to use
+library(ExperimentHub)
+eh <- ExperimentHub()
+
+## query
+refs <- query(eh, "clustifyrdatahub")
+refs
+# I want the brain development library 
+# use pre- made reference of development human cortex brain samples from Nowakowski et al Science 2017
+#   EH3451 | ref_cortex_dev    
+
+ref_brain <- refs[[8]]
+
+
+# Direct handling of Seurat object
+res <- clustify( MBO.combined, 
+                 ref_mat = ref_brain,
+                 cluster_col = "seurat_clusters",
+                 seurat_out = TRUE
+)
+
+#check the correlation matrix
+res@meta.data$type[1:10, ] # the output is the in 'type' column
+
+# try to visualize
+DimPlot(res, reduction = "umap", repel = TRUE, label = TRUE, group.by = "type")
+
+```
+There is one cluster assigned as astrocytes.
+There are two groups of radial glia, a dividing group and oRG (outer radial glia)
+The neurons are assigned as Glyc (cell undergoing glycolysis) and EN-PFC2 (Early and Late Born Excitatory Neurons)
+Some of the glia and the other cells that could be epithelial and endothelial cells are not assigned.  The is endothelial but not epithelial cells in the reference data.  
+
+
+
+```{r}
+# try another reference dataset
+
+lake <- readRDS("/home/rhalena/scRNAseq/publicdata/scDatasets/lake.rds")
+# this dataset is formatted by the Hemburge lab and is a singlecellexperiment object
+# this is adult brain and 
+# make into a reference matrix
+
+sce_ref_lake <- object_ref(
+  input = lake,               # SCE object
+  cluster_col = "cell_type1"       # name of column in colData containing cell identities
+)
+
+# Direct handling of Seurat object
+res.lake <- clustify( MBO.combined, 
+                 ref_mat = sce_ref_lake,
+                 cluster_col = "seurat_clusters",
+                 seurat_out = TRUE
+)
+
+DimPlot(res.lake, reduction = "umap", repel = TRUE, label = TRUE, group.by = "type")
+
+
+```
+The neurons are all labeled as two subgroups of inhibitory neurons and all the other cells are unknown
+
+```{r}
+# try another reference dataset
+# fetal midbrain
+
+manno <- readRDS("/home/rhalena/scRNAseq/publicdata/scDatasets/manno_human.rds")
+# this dataset is formatted by the Hemburge lab and is a singlecellexperiment object
+# this is adult brain and 
+# make into a reference matrix
+
+sce_ref_manno <- object_ref(
+  input = manno,               # SCE object
+  cluster_col = "cell_type1"       # name of column in colData containing cell identities
+)
+
+# Direct handling of Seurat object
+res.manno <- clustify( MBO.combined, 
+                 ref_mat = sce_ref_manno,
+                 cluster_col = "seurat_clusters",
+                 seurat_out = TRUE,
+                 n_genes = 2000
+)
+
+DimPlot(res.manno, reduction = "umap", repel = TRUE, label = TRUE, group.by = "type")
+
+
+
+
+```
+
+With this dataset all the gila are assigned as different types of radial glia
+The neurons are all assigned as either neurons or neural progenitors although inhibitory.
+
+
+Single R
+
+
+```{r}
+library("SingleR")
+library("scRNAseq") # this has the reference objects premade
+
+# single R uses a generic structure I believe I need to pull out the normalized expression data
+browseVignettes("scRNAseq")
+out <- listDatasets()
+out[5:16, ]
+
+
+
+```
+
+Using Single R - from The SingleR book
+
+```{r}
+#library("SingleR")
+# reference loaded above
+# Seurat object already created
+# I need to use the normalized counts matrix from the Seurat object
+DefaultAssay(MBO.combined) <- "RNA"
+MBO.combined <- NormalizeData(MBO.combined, normalization.method = "LogNormalize") 
+MBO.combined <- ScaleData(MBO.combined) 
+
+mnc <- GetAssayData(MBO.combined, slot = "scale.data")
+
+
+```
+
+
+```{r}
+library(SingleR)
+# get the singleR preditions based on the reference data
+
+# try with the human primary cell atlas
+# single cell method
+pred.MBO <- SingleR(test = mnc, ref = hpca.se, assay.type.test=1,
+    labels = hpca.se$label.main)
+
+
+
+
+```
+
+
+```{r}
+pred.MBO
+# Summarizing the distribution:
+table(pred.MBO$labels)
+
+
+```
+
+```{r}
+# add Single cell labels into Seurat
+
+MBO.combined[["SingleR.labels.hpca"]] <-pred.MBO$labels
+
+DimPlot(MBO.combined, reduction = "umap", repel = TRUE, label = TRUE, group.by = "SingleR.labels.hpca")
+
+```
+A lot of different cell types come up - including the expected neurons but many false labels eg T_cells, osteoblasts, smooth_muscle
+
+```{r}
+pred.MBO.c <- SingleR(test = mnc, ref = hpca.se, clusters = MBO.combined@meta.data$seurat_clusters, assay.type.test=1,
+    labels = hpca.se$label.main)
+
+
+
+pred.MBO.c@listData$labels
+# Summarizing the distribution:
+table.pred.MBO.c <- table(pred.MBO.c$labels)
+
+
+
+
+```
+The cluster indexes are given above - astrocytes and neurons all match with expected clusters.  The other cell types do not make sense.  The epithelial cell group could be correct. 
+
+
+Look at expression of known cell type markers across clusters.
+
+
+```{r}
+
+# general neuronal marker
+neurons <- c("MAP2","GRIA1","GRIA2","GRIA3","GRIA4","GRIN1","GRIN2B","GRIN2A","GRIN3A","CAMK2A","DLX2","CD24","SYPL1","SYPL2","VAMP2","NTRK1","NTRK2","NTRK3","SATB2","TBR1","TUBB3","RBFOX3","DCX","SYP","GAD1","GAD2","GABRA1","GABRB2","RYR2","NEUROD6","STMN2","NRN1")
+neuron2 <- c("NPY","SST","SNAP25","VIP","SCG2","BTBD11","DISP2","GALNTL6","SERTM1","SYT13","VSTM2A","ZMAT4") # from McKenzie et al
+DotPlot(MBO.combined, features = neurons) + theme(axis.text.x = element_text(angle = 90)) + ggtitle("Neuronal Marker Expression")
+DoHeatmap(MBO.combined, group.by = "seurat_clusters", features = neurons) + ggtitle("Neuronal Marker Expression")
+
+DotPlot(MBO.combined, features = neuron2) + theme(axis.text.x = element_text(angle = 90)) + ggtitle("Neuronal Marker Expression new")
+DoHeatmap(MBO.combined, group.by = "seurat_clusters", features = neuron2) + ggtitle("Neuronal Marker Expression new")
+
+#VlnPlot(MBO.combined, features =  neurons) + ggtitle("Neuronal Marker Expression") too many markers to see
+#RidgePlot(MBO.combined, features = neurons, ncol=2) + ggtitle("Neuronal Marker Expression")
+
+# neural stem cells
+neural.stem <- c("NEUROD", "MSX1", "SSEA1","ASCL1")
+DotPlot(MBO.combined, features = neural.stem) + theme(axis.text.x = element_text(angle = 90)) + ggtitle("Neuronal Stem Cell Marker Expression")
+
+# excitatory neurons / glutatmatergic 
+
+# inhibitory neurons / GABAergic
+GABA <- c("GAD1","GAD2","GABRA1","GABRB2","RYR2")
+
+# inhibitory neuron cholonergic
+
+# Dopapminergic
+DaN <- c("TH","LMX1B","KCNJ6","NR4A2","SLC6A3","CALB1","CALB2","DRD2","DAT", "PITX3","CORIN","DRD1","DRD2","DRD4","DRD5","FOXA2","LIMX1A","OTX2","RPS6KA5","NOG","NR4A1","WNT1","EN1","EN2","CPNY1","FOLR1","DMRTA2")
+# from the Human cell Landscape viewer LaManno
+DaN <- c("ALDH1A1","NR4A2","PBX1","CAMK2N1","TMCC3","EN1","ANK3","GAP43","CELF4","SLC18A2","TMEFF2","RTN1","GRIA3","STMN2")
+
+DotPlot(MBO.combined, features = DaN) + theme(axis.text.x = element_text(angle = 90)) + ggtitle("Dopaminergic Neuron and Precursor Marker Expression")
+DoHeatmap(MBO.combined, group.by = "seurat_clusters", features = DaN) + ggtitle("Dopaminergic Neuron and Precursor Marker Expression")
+DoHeatmap(MBO.combined, features = DaN) + ggtitle("Dopaminergic Neuron and Precursor Marker Expression")
+
+VlnPlot(MBO.combined, features =c("TH","NR4A2")) + ggtitle("Dopaminergic neurons")
+
+
+
+```
+
+
+```{r}
+
+astrocyte <- c("AQP4","S100B","SLC1A3","SLC1A2","CPE","CLU","ADGRV1","CLDN10","ETNPPL","PRSS35","RNF219-AS1","STON2","TPD52L1","ALDH1L-1","GFAP")
+pAstro <- VlnPlot(AST23, features = astrocyte)
+pAstro
+
+
+radial.glia <- c("HOPX","VIM")
+
+# with markers from Eze, Ugomma C., et al. "Single-cell atlas of early human brain development highlights heterogeneity of human neuroepithelial cells and early radial glia." Nature neuroscience 24.4 (2021): 584-594.
+RG <- c("FAM60A","MTM1","SFRP1","SLC1A3","RSF1","ZNF844","ME152","RBM6","DLK1","EMX2","TTYH1","HES1","HSPA1B","HSPA1A","SOX2","HOPX","GLAST","VIM","CD44")
+# note SLC1A3 is GLAST
+DotPlot(MBO.combined, features = RG) + theme(axis.text.x = element_text(angle = 90)) + ggtitle("Radial Glial all types Marker Expression")
+DoHeatmap(MBO.combined, group.by = "seurat_clusters", features = RG, size=4, angle =90, group.bar.height = 0.05) + ggtitle("Radial Glial all types Marker Expression")
+
+
+
+opc <- 
+oligodendrocyte <- c("PLP1","CNP","MAL","MOG","CRYAB", "ANLN","CARNS1","CLCA4", "CTNNA3","PAIP2B","QDPR","SLAIN1","SOX2-OT","TMEM144", "OLIG1","OLIG2","FTH1")
+DotPlot(MBO.combined, features = oligodendrocyte) + theme(axis.text.x = element_text(angle = 90)) + ggtitle("Oligodendrocyte Marker Expression")
+DoHeatmap(MBO.combined, group.by = "seurat_clusters", features = oligodendrocyte, size=4, angle =90, group.bar.height = 0.05) + ggtitle("Oligodendrocyte Marker Expression")
+
+
+
+```
+
+
+```{r}
+# other cells 
+
+# endothelial Collagen IV 
+endothelial <- c("APOLD1","ITM2A","BSG","IFITM1","RSG5","")
+microglia <- c("CCL4","CCL3","CTSS","TYROBP","CD83")
+
+ependymal <- c("FOXJ1")
+
+```
+
+
+Name cluster - based on looking at top markers compared to expression databases UCSC, Single Cell Landscape and DEG published.
+
+I will combine Cluster 2 and 3 - they are both more mature neurons that contain both excitatory and inhibitory neurons - they may be interesting later but for our purposes these can be merged. I will also merge 10 and 12 the two clusters containing the most DA marker expression.
+
+I will not merge the Radial Glia because they are all different from each other. 
+
+Cluster annotation
+
+0	Astroctye
+1	RG-a
+2	Neuron
+3	Neuron
+4	Astrocyte-i
+5	Epithelial
+6	Oligodendrocyte
+7	Neuron-inh
+8	Neuron-exc
+9	RG-d1
+10	Neuron-DA
+11	Other
+12	Neuron-DA
+13	RG-d2
+14	Neural Precursors
+
+
+Rename clusters and look at expression plus markers
+
+```{r}
+
+Idents(MBO.combined) <- "seurat_clusters"
+cluster.id <- c("Astrocytes-1","RGa","Neurons","Neurons","Astrocytes-2","Epithelial","Oligodendrocytes","Neurons-i","Neurons-e","RGd1","Neurons-DA","Other","Neurons-DA","RGd2","Neural Precursors")
+# apply the cluster names
+names(cluster.id) <- levels(MBO.combined)
+# rename cluster in active.ident
+MBO.combined <- RenameIdents(MBO.combined, cluster.id)
+# save the names for later in metadata
+MBO.combined$cluster_labels <- Idents(MBO.combined)
+saveRDS(MBO.combined,"MBOcombinedClusterNames.rds")
+MBO.combined <- readRDS("MBOcombinedClusterNames.rds")
+
+colours = c("#5AC896", # astro 1 green
+            "#2A939F", # RGa blue
+            "#8AD8B9", # Neurons - 
+            "#2A913F", # Astro -2
+            "#9960C5", # epi
+            "#C05862", # oligo
+            "#D6AA75", # Neur i beige
+            "#E6B6A1", # Neur e
+            "#C970A1", # RGd1
+            "#ACCD4A", # Neurons-DA
+            "grey", # Other grey 
+            "#2A73A5", # RGd2
+            "#BD5D44") # NPC
+
+#names(cluster.id) <- levels(MBO.combined)
+#MBO.combined <- RenameIdents(MBO.combined, cluster.id)
+DimPlot(MBO.combined, reduction = "umap", label = TRUE, label.size = 4.5, pt.size = 0.5, cols = colours, repel = TRUE) + NoLegend()
+
+# save the plot
+
+tiff("UMAP_labelledClustersMBO.tiff", units = "in", width = 6, height = 5, res=300)
+  DimPlot(MBO.combined, reduction = "umap", label = TRUE, label.size = 5, pt.size = 0.5, cols = colours, repel = TRUE) + NoLegend()
+dev.off()
+
+# without the labels
+png("UMAP_labelledClustersMBO-noLab_legend.png")
+  DimPlot(MBO.combined, reduction = "umap", label = FALSE, label.size = 4.5, pt.size = 0.5, cols = colours, repel = TRUE)
+dev.off()
+
+# without labels or legend
+png("UMAP_labelledClustersMBO-noLab.png")
+  DimPlot(MBO.combined, reduction = "umap", label = FALSE, label.size = 4.5, pt.size = 0.5, cols = colours, repel = TRUE)  + NoLegend()
+dev.off()
+
+
+```
+
+Compare AST23 to control
+
+```{r}
+DimPlot(MBO.combined,split.by = "orig.ident",pt.size = 0.5, label= TRUE, repel = TRUE, label.size = 3, cols = colours) + NoLegend()
+
+# save an image
+tiff("UMAP_split_clusters.tiff", units = "in", width = 12, height = 5, res=300)
+DimPlot(MBO.combined,split.by = "orig.ident",pt.size = 0.5, label= TRUE, repel = TRUE, label.size = 3, cols = colours) + NoLegend()
+dev.off()
+```
+
+Proportion test to see in these to samples if the difference are significant.  However for this test we can only consider this as n=1 replicate of proportions so we cannot make conclusions.
+
+```{r}
+
+library("scProportionTest")
+
+# have a seurat object 
+# add the test
+prop_test <- sc_utils(MBO.combined)
+
+# Once the object is created, the permutation testing and bootstrapping can be run.
+prop_test <- permutation_test(
+	prop_test, cluster_identity = "cluster_labels",
+	sample_1 = "Isogenic", sample_2 = "AST23",
+	sample_identity = "orig.ident"
+)
+
+# A point-range plot of the results can then be created.
+
+permutation_plot(prop_test)
+
+
+
+```
+
+
+
+
+Expression of TH
+
+```{r}
+FeaturePlot(MBO.combined, features = "TH",split.by = "orig.ident",pt.size = 0.5, label= TRUE, repel = TRUE, label.size = 3)
+# we can see that TH expression is low overall.  More cells express TH in the isogenic control and in particular in the NPCs.  There is some TH expression in the more mature neurons.  In the triplication 
+
+# save an image
+tiff("UMAP_split_TH.tiff", units = "in", width = 12, height = 5, res=300)
+  FeaturePlot(MBO.combined, features = "TH",split.by = "orig.ident",pt.size = 0.5, label= TRUE, repel = TRUE, label.size = 3)
+dev.off()
+
+
+
+```
+SNCA expression
+
+```{r}
+FeaturePlot(MBO.combined, features = "SNCA",split.by = "orig.ident",pt.size = 0.5, label= TRUE, repel = TRUE, label.size = 3)
+# There are more cells in the isogenic in total so the it looks like more.  The overall proportions and cluster proportions the expression is higher in AST23
+
+# save an image
+tiff("UMAP_split_SNCA.tiff", units = "in", width = 12, height = 5, res=300)
+  FeaturePlot(MBO.combined, features = "SNCA",split.by = "orig.ident",pt.size = 0.5, label= TRUE, repel = TRUE, label.size = 3)
+dev.off()
+
+
+```
+
+
+
+```{r}
+# Expression of cell type markers selected from TOP20 seurat cluster markers 
+# 0	and 4 Astroctye  : APOE, AQP4, CLU, GDF10, NTRK2, SAT1, MGST1, CST3,EDNRB, SLC1A3
+# 1	and 9 and 13 RG : DLL1, ASCL1, SOX9, NFIA, POU3F2, VIM, MSX1, PEG10, MKI67, PCNA
+# 2	and 3 Neuron: SYT1, INA, OLFM1,CHRM2, SYNPR, DCX,
+# 5	Epithelial: GDF15, ATF5, ANXA2, DDIT3, SQSTM1, SLC3A2, ANXA1, CRYAB,
+# 6	Oligodendrocyte: FTH1, FTL, CD99, 
+# 7	Neuron-inhibitory: GAD1, GAD2, SOX4, STMN1, CRHBP, RELN
+# 8	Neuron-excitatory : MALAT1, LUC7L3, GRIA2, ANKRD36C, GRIN2B
+# 10 and 12	Neuron-DA : ELAVL14, TENM1, STMN2, NEGR1, SYT4, NNAT, NEUROD6, SOX11, LHX2
+# 11	Other
+# 14	Neural Precursors:SCG2, CALB1, H2AFZ, NRN1, TPH1,CHRNA5
+
+ast <- c("APOE", "AQP4", "CLU", "GDF10", "SAT1", "NTRK2", "MGST1", "CST3","EDNRB", "SLC1A3","ETV1","PTPRZ1","FGFBP3","DNER","SPARCL1" )
+RG <- c("DLL1", "ASCL1", "SOX9", "NFIA", "POU3F2", "VIM", "MSX1","KCNJ16","DCN","ABCA8","NRN1","GNG11", "PEG10", "MKI67", "PCNA","CENPU","CENPF","NUSAP1","CDK1","H2AFZ","HMGB2")
+olig <- c("FTH1", "FTL", "CD99","RPS24", "SAT1","RPL12", "PTGDS", "S100A10", "MT3","GNG11")
+olig <- c("RPS24","RPL12", "FTH1")
+ep <- c("GDF15", "ATF5", "ANXA2", "DDIT3", "SQSTM1", "SLC3A2", "ANXA1", "CRYAB")
+neuron <- c("SYT1", "INA", "OLFM1","CHRM2", "SYNPR", "DCX","GAD1","GAD2", "SOX4", "STMN1", "CRHBP", "RELN","MALAT1", "LUC7L3", "GRIA2", "ANKRD36C", "GRIN2B","ELAVL14","TENM1", "STMN2", "NEGR1", "SYT4", "NNAT", "NEUROD6", "SOX11", "LHX2")
+neuron <- c("SYT1","STMN1", "INA", "SYNPR", "DCX","GAD1","GAD2", "RELN","MALAT1", "LUC7L3", "GRIA2", "ANKRD36C","ELAVL14", "STMN2", "NEGR1", "SYT4", "NNAT")
+npc <- c("SCG2", "CALB1", "NRN1")
+
+# to see everything together we need fewer markers. There are 9 groups - I'll take 3 markers each
+# astro,radial glia, oligo, epithelial, neuron, inhibitory, excitatory, da-neuron, NPC
+clustermarkers <- c("AQP4", "CLU", "SLC1A3", "ASCL1","MSX1", "MKI67","RPS24","RPL12", "FTH1","DDIT3", "SQSTM1","ATF5","SYT1","STMN1", "DCX","GAD1","GAD2", "RELN","MALAT1", "LUC7L3", "GRIA2", "STMN2", "SYT4", "NNAT","SCG2", "CALB1", "NRN1")
+
+# I think it will be clearer with selection for each differently labelled clusters - I'll select 3 from each in order
+# 0	Astroctye
+# 1	RG-a
+# 2 and 3	Neuron
+# 4	Astrocyte 
+# 5	Epithelial
+# 6	Oligodendrocyte
+# 7	Neuron-inh
+# 8	Neuron-exc
+# 9	RG-d1
+# 10 and 12	Neuron-DA
+# 11	Other - take top 3 markers "AFT3","BBC3","GADD45A" 
+# 13	RG-d2
+# 14	Neural Precursors
+
+
+
+markers3 <- c("AQP4", "CLU","APOE"   ,"DLL1", "ASCL1", "POU3F2"  ,"SYT1","STMN1","DCX"   , "EDNRB", "SLC1A3","ETV1" ,"DDIT3", "SQSTM1","ATF5"   ,"RPS24","RPL12", "FTH1"   ,"GAD1","GAD2", "RELN"  , "MALAT1", "LUC7L3", "GRIA2"  ,"ABCA8","GNG11","VIM", "STMN2", "SYT4", "NNAT","AFT3","BBC3","GADD45A"   ,"CENPF","CDK1","HMGB2"  ,"SCG2", "CALB1", "NRN1")
+
+DoHeatmap(MBO.combined, features = markers3, angle = 90, group.colors = colours, size = 4)  + NoLegend() 
+
+tiff("HeatMap_clustermarkers_labelledCluster.tiff", units = "in", width = 6, height = 12, res=300)
+  DoHeatmap(MBO.combined, features = markers3, angle = 90, group.colors = colours, size = 4)  + NoLegend() 
+dev.off()
+
+
+
+
+
+```
+
+Expression of dopaminergic markers
+
+```{r}
+
+# Dopapminergic neurons and precurosors 
+# markers taken from liturature including Poulin et al and from the Human cell Landscape viewer LaManno
+
+# note SLC6A3 is DAT
+DaN <- c("TH","LMX1B","KCNJ6","NR4A2","SLC6A3","SLC18A2","TACR3","SLC17A6","GRP","LPL","CCK","SOX6","NDNF","SNCG","ALDH1A1" ,"CALB1","CALB2","DRD2","DAT", "PITX3","CORIN","DRD1","DRD2","DRD4","DRD5","FOXA2","LIMX1A","OTX2","RPS6KA5","NOG","NR4A1","WNT1","EN1","EN2","CPNY1","FOLR1","DMRTA2","PBX1","CAMK2N1","TMCC3","EN1","ANK3","GAP43","CELF4","SLC18A2","TMEFF2","RTN1","GRIA3","STMN2")
+
+# remove genes with little or know expression except TH and DAT
+DaN <- c("TH","SLC6A3","LMX1B","KCNJ6","NR4A2","TACR3","SLC17A6","SNCG","ALDH1A1" ,"CALB1","CALB2","FOXA2","OTX2","RPS6KA5","EN1","EN2","DMRTA2","PBX1","CAMK2N1","TMCC3","ANK3","GAP43","CELF4","SLC18A2","TMEFF2","RTN1","GRIA3","STMN2")
+
+DoHeatmap(MBO.combined, features = DaN, angle = 90, group.colors = colours, size = 4)  + NoLegend()
+
+tiff("HeatMap_DAmarkers_labelledCluster.tiff", units = "in", width = 6, height = 12, res=300)
+  DoHeatmap(MBO.combined, features = DaN, angle = 90, group.colors = colours, size = 4)  + NoLegend() 
+dev.off()
+
+
+```
+
+
+```{r}
+
+
+```
+
+
+Reactive astrocytes Markers from scartin, Carole, et al. "Reactive astrocyte nomenclature, definitions, and future directions." Nature neuroscience 24.3 (2021): 312-325.
+
+```{r}
+# cytoskeleton: GFAP, Nestin, Synemin Vimentin  - official gene names must be used
+cyto <- c("GFAP", "NES", "SYNM","VIM")
+# Metabolism: ALDOC, BLBP/FABP7, MAOB, TSPO
+metabolism <- c("ALDOC","FABP7", "MAOB", "TSPO")
+# chaperopnes: CRYAB, HSPB1/HSP27
+chap <- c("CRYAB", "HSPB1")
+# secreted proteins: C3, CHI3L1/YKL40, LCN2, SERPINA3N/ACT, MT, THBS-1
+secr <- c("C3","CHI3L1","LCN2","SERPINA3","THBS1")
+# cell signaling: NFAT, NTRK2 (TrkB), S100B, SOX9, STAT3
+#cellsignal <- ("NFAT","NTRK2","IL17R","S100B","SOX9","STAT3")
+# transporter: EAAT1&2 gene names , KIR4.1
+transporter <- c("SCL1A2","SCL1A3","KCNJ10")
+
+# CD49f is ITGA6
+reac.astro <- c("GFAP", "NES", "SYNM","VIM","ALDOC","FABP7", "MAOB", "TSPO","CRYAB", "HSPB1","C3","CHI3L1","LCN2","SERPINA3","THBS1","NFAT","NTRK2","IL17R","S100B","SOX9","STAT3","SCL1A2","SCL1A3","KCNJ10","ITGA6")
+
+# all clusters together
+DotPlot(MBO.combined, features = reac.astro, group.by = "orig.ident") + RotatedAxis()
+
+# split clusters
+DotPlot(MBO.combined, features = reac.astro, group.by = "cluster_labels", split.by = "orig.ident") + RotatedAxis()
+
+# save plot
+tiff("DotPlot_ActiveAstrocyte_labelledCluster.tiff", units = "in", width = 9, height = 7, res=300)
+  DotPlot(MBO.combined, features = reac.astro, group.by = "cluster_labels", split.by = "orig.ident") + RotatedAxis()
+dev.off()
+
+# some genes are not found but I have used the official gene name it is suprising EAAT2 (SCL1A3) would not be expressed.
+# heatmap
+DoHeatmap(MBO.combined, features = reac.astro, angle = 90, group.colors = colours, size = 4)  + NoLegend()
+
+```
+
+Get mean expression values per cluster.
+Then we will split by genotype.
+
+```{r}
+cluster.averages <- AverageExpression(MBO.combined)
+head(cluster.averages[["RNA"]][, 1:5])
+
+# I can filter this table to get the genes I want but it won't be split by genotype
+
+```
+
+```{r}
+# Return this information as a Seurat object (enables downstream plotting and analysis) First,
+# replace spaces with underscores '_' so ggplot2 doesn't fail
+orig.levels <- levels(MBO.combined)
+Idents(MBO.combined) <- gsub(pattern = " ", replacement = "_", x = Idents(MBO.combined))
+orig.levels <- gsub(pattern = " ", replacement = "_", x = orig.levels)
+levels(MBO.combined) <- orig.levels
+cluster.averages.o <- AverageExpression(MBO.combined, return.seurat = TRUE)
+cluster.averages.o
+# make a plot
+CellScatter(cluster.averages.o, cell1 = "Neurons", cell2 = "Neurons-DA")
+
+```
+
+Two get the values for each genotype and cluster separately I'll need to make a set of labels that contain both variables.
+
+```{r}
+
+MBO.combined$cluster_labels <- Idents(MBO.combined)
+
+cell.genes <- paste(MBO.combined$cluster_labels, MBO.combined$orig.ident, sep = "_")
+MBO.combined$cell.genes <- cell.genes
+
+# now get the mean values for the cell.genes (Cluster labels + genotype)
+
+cluster.geno.ave <- AverageExpression(MBO.combined, group.by = "cell.genes")
+
+ave.exp.mat <-cluster.geno.ave[["RNA"]]
+df.ave <- as.data.frame(ave.exp.mat)
+class(df.ave)
+# now I can filter this to get the mean cluster expression values
+gene.list <- c("TH","SNCA")
+
+# DA markers and reactive astrocytes
+large.list <- c("SNCA", "GFAP", "NES", "SYNM","VIM","ALDOC","FABP7", "MAOB", "TSPO","CRYAB", "HSPB1","C3","CHI3L1","LCN2","SERPINA3","THBS1","NFAT","NTRK2","IL17R","S100B","SOX9","STAT3","SCL1A2","SCL1A3","KCNJ10","ITGA6","TH","LMX1B","KCNJ6","NR4A2","SLC6A3","SLC18A2","TACR3","SLC17A6","GRP","LPL","CCK","SOX6","NDNF","SNCG","ALDH1A1" ,"CALB1","CALB2","DRD2","DAT", "PITX3","CORIN","DRD1","DRD2","DRD4","DRD5","FOXA2","LIMX1A","OTX2","RPS6KA5","NOG","NR4A1","WNT1","EN1","EN2","CPNY1","FOLR1","DMRTA2","PBX1","CAMK2N1","TMCC3","EN1","ANK3","GAP43","CELF4","SLC18A2","TMEFF2","RTN1","GRIA3","STMN2")
+
+df.exp <- df.ave %>% filter(row.names(df.ave) %in% large.list)
+
+write.csv(df.exp,"MeanExpressionLargeGeneListPerclusterandgeneotype.csv")
+
+# save the data object with cell.gene names
+
+saveRDS(MBO.combined, "MBOclusters_names29072021.rds")
+#MBO.combined <- readRDS("MBOclusters_names29072021.rds")
+
+```
+
+
+Have a look at the average gene expression in a heatmap
+
+```{r}
+cluster.gene.hm <- AverageExpression(MBO.combined, group.by = "cell.genes", return.seurat = TRUE)
+# this plots per clusters and they are split but they are not labeled isogenic vs control I believe it goes AST23 isogenic
+DoHeatmap(cluster.gene.hm, features = gene.list, size = 3, 
+    draw.lines = FALSE, disp.max = 5, disp.min = -5,group.bar = TRUE) + scale_fill_gradientn(colors = c("blue","light grey","green"))
+
+# save this plot
+tiff("Heatmap_split_clusters_TH_SNCA_2.tiff", units = "in", width = 6, height = 6, res=300)
+DoHeatmap(cluster.gene.hm, features = gene.list, size = 3, 
+    draw.lines = FALSE, disp.max = 5, disp.min = -5,group.bar = TRUE) + scale_fill_gradientn(colors = c("blue","green"))
+dev.off()
+
+
+
+```
+
+
+
+
+Proportions of cells expressing a marker in different clusters.  
+Different cutoff can also be applied,  I will not apply a cutoff. 
+
+```{r}
+# adapted from a response to brianpenghe by Ryan-Zhu on github issues
+
+# This will get the proportion of cells 
+
+PrctCellExpringGene <- function(object, genes, group.by = "all"){
+    if(group.by == "all"){
+        prct = unlist(lapply(genes,calc_helper, object=object))
+        result = data.frame(Markers = genes, Cell_proportion = prct)
+        return(result)
+    }
+
+    else{        
+        list = SplitObject(object, group.by)
+        factors = names(list)
+
+        results = lapply(list, PrctCellExpringGene, genes=genes)
+        for(i in 1:length(factors)){
+        results[[i]]$Feature = factors[i]
+        }
+        combined = do.call("rbind", results)
+        return(combined)
+    }
+}
+
+calc_helper <- function(object,genes){
+    counts = object[['RNA']]@counts
+    ncells = ncol(counts)
+    if(genes %in% row.names(counts)){
+    sum(counts[genes,]>0)/ncells
+    }else{return(NA)}
+}
+
+gene.list <- c("TH","SNCA")
+totalEXP <- PrctCellExpringGene(MBO.combined,genes= gene.list)
+
+byMBO <- PrctCellExpringGene(MBO.combined,genes=gene.list, group.by = "orig.ident")
+
+byCluster <- PrctCellExpringGene(MBO.combined,genes=gene.list, group.by = "cluster_labels")
+
+write.csv(byCluster,"Proportionof_markerEXP_byCluster_byMBO.csv")
+write.csv(byMBO,"Proportionof_markerEXP_byMBO.csv")
+write.csv(totalEXP,"Proportionof_markerEXP_total.csv")
+
+
+
+```
+
+
+
+Calculate differential expression in the whole sample and in some clusters
+
+```{r}
+
+MBO.combined <- readRDS("/home/rhalena/scRNAseq/BrainCommRevision/MBOcombinedClusterNames.rds")
+
+# all v
+Idents(MBO.combined) <- "orig.ident"
+
+AST23vsIso <- FindMarkers(MBO.combined, ident.1 = 'AST23' , ident.2 = 'Isogenic', threshold= 0, min.pct = 0 )
+write.csv(AST23vsIso, "DifferentialExpressionAST23vsIsogenic.csv")
+# neither TH or SNCA is present
+
+# compare clusters
+Idents(MBO.combined) <- "cell.genes"  # make sure this was added to the meta data 
+# this will have the cluster labels and genotype togethe
+
+NPC_AST23vsIso <- FindMarkers(MBO.combined, ident.1 = 'Neural Precursors_AST23' , ident.2 = 'Neural Precursors_Isogenic', threshold= 0, min.pct = 0)
+write.csv(NPC_AST23vsIso, "DifferentialExpressionAST23vsIsogenic_NPC.csv")
+# SNCA is not present
+# TH has -0.35 Log2FC with p= 0.07 - not surprising because the proportions of cells expressing TH is low
+
+# try the DA neurons
+DAN_AST23vsIso <- FindMarkers(MBO.combined, ident.1 = 'Neurons-DA_AST23' , ident.2 = 'Neurons-DA_Isogenic', threshold= 0, min.pct = 0)
+write.csv(DAN_AST23vsIso, "DifferentialExpressionAST23vsIsogenic_DAN.csv")
+
+# SNCA 0.2909 L2FC with p= 0.24
+# TH is absent
+
+
+# I will need to subset out all the TH or SNCA expressing cells and then calculate from there, this doesn't seem relevant as the proportion of cells expressing the markers is likely different.  
+
+
+```
+
+
+
+
